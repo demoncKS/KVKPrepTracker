@@ -3,13 +3,20 @@
 import json, os, datetime, html
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-D = json.load(open(os.path.join(HERE, 'data.json')))
-ROWS, HOME, AWAY, DAY = D['rows'], D['home'], D['away'], D['day']
+D = json.load(open(os.environ.get('DATA', os.path.join(HERE, 'data.json'))))
+ROWS, HOME, AWAY = D['rows'], D['home'], D['away']
+# DAY can be pinned to re-create how the page looked at the end of an earlier day
+DAY = int(os.environ.get('DAY', D['day']))
+LIVE = DAY == D['day']          # a pinned earlier day is finished, not running
 LO, HI = D['zone']
 ROMAN = ['I', 'II', 'III', 'IV', 'V']
 
+# the opponent can sit outside the zone we compare against, in which case it is
+# still pinned on the charts but never counted in the distribution or the boards
 by = {r['kid']: r for r in ROWS}
+by.update({r['kid']: r for r in D.get('extra', [])})
 me, them = by[HOME], by[AWAY]
+AWAY_IN_ZONE = AWAY in {r['kid'] for r in ROWS}
 
 def q(a, p):
     s = sorted(a)
@@ -17,6 +24,13 @@ def q(a, p):
 
 def pctile(a, v):
     return sum(1 for x in a if x < v) / len(a) * 100
+
+for r in list(by.values()):
+    r['s'], r['o'] = r['days'][DAY - 1]
+ROWS = [r for r in ROWS if r['s'] > 0]
+by = {r['kid']: r for r in ROWS}
+by.update({r['kid']: r for r in D.get('extra', [])})
+me, them = by[HOME], by[AWAY]
 
 scores = [r['s'] for r in ROWS]
 per = [r['s'] / r['a7'] for r in ROWS if r['a7']]
@@ -34,6 +48,8 @@ for r in ROWS:
     if gaps[-1] >= max(gaps):
         worst = (r['kid'], r['opp']) if r['s'] > r['o'] else (r['opp'], r['kid'])
 our_gap = max(me['s'], me['o']) / min(me['s'], me['o'])
+# the gap is a size, not a direction, so who is actually in front is separate
+AHEAD = me['s'] >= me['o']
 
 def m(v):  return f'{v/1e6:,.1f}M'
 def k(v):  return f'{v/1e3:,.0f}k'
@@ -117,7 +133,8 @@ targets = [
     target('Reach the middle of the zone', q(scores, .5)),
     target('Reach the top quarter of the zone', q(scores, .75)),
     target('Reach the top ten in the zone', srt[9]),
-    target(f'Match kingdom {AWAY} today', them['s']),
+    target(f'Hold our lead over kingdom {AWAY}' if AHEAD
+           else f'Match kingdom {AWAY} today', them['s']),
 ]
 
 rank_per = sorted(ROWS, key=lambda r: -(r['s'] / r['a7'] if r['a7'] else 0))
@@ -162,7 +179,7 @@ for i in range(5):
     dh, da = me['days'][i]
     name, art = DAYS[i]
     if i + 1 < DAY or (i + 1 == DAY and dh):
-        state = 'done' if i + 1 < DAY else 'live'
+        state = 'live' if (i + 1 == DAY and LIVE) else 'done'
         mid = (f'<span class="dnum us">{m(dh)}</span>'
                f'<span class="dbar"><i style="width:{dh/(dh+da)*100 if dh+da else 50:.1f}%"></i></span>'
                f'<span class="dnum them">{m(da)}</span>')
@@ -183,11 +200,22 @@ RULE = f'<img class="rule" src="{A["divider"]}" alt="">'
 CORNERS = ''.join(f'<img class="cnr c{i}" src="{A["corner"]}" alt="">' for i in range(4))
 
 
+# only worth saying when they are the ones setting the pace
+PACE_NOTE = '' if AHEAD else (
+    '<p class="note" style="margin-top:14px">The last row is on the list for '
+    'completeness, not as a goal. Only %d of %d kingdoms in the zone are scoring at '
+    "%d's rate per player.</p>"
+    % (sum(1 for v in per if v >= them_per), len(per), AWAY))
+
+
 def head(icon, title):
     return f'<h2><img class="hicon" src="{A[icon]}" alt="">{title}</h2>'
 
 
-HTML = f'''<title>KvK Prep Week Tracker</title>
+# the <title> names the page in a gallery, so snapshots get their own
+PAGE_TITLE = os.environ.get('TITLE', 'KvK Prep Week Tracker')
+
+HTML = f'''<title>{PAGE_TITLE}</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Lilita+One&display=swap">
 <style>
@@ -367,8 +395,8 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
   <p class="lede">Prep week is five days long and every kingdom scores points each day.
   A score on its own tells you nothing, so this page puts kingdom {HOME}'s score next to
   the {len(ROWS)-1} other kingdoms around us and shows whether it is a good day or a quiet one.
-  It refreshes every day.</p>
-  <p class="stamp">Day {ROMAN[DAY-1]} of V &middot; scores as at {built} &middot; source kvk.kingshotsimulator.com</p>
+  {'It refreshes every day.' if LIVE else 'This is a snapshot of day ' + ROMAN[DAY-1] + ', taken after it closed.'}</p>
+  <p class="stamp">Day {ROMAN[DAY-1]} of V &middot; {'scores as at' if LIVE else 'final scores, captured'} {built} &middot; source kvk.kingshotsimulator.com</p>
 
   <div class="versus">
     {CORNERS}
@@ -404,7 +432,7 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
       <div class="sub">{pctile(scores,me['s']):.0f}th percentile, {pos_abs} of {len(ROWS)}</div></div>
     <div class="tile"><div class="lab">Kingdom {AWAY}</div>
       <div class="big" style="color:var(--them)">{m(them['s'])}</div>
-      <div class="sub">{pctile(scores,them['s']):.0f}th percentile, {[r['kid'] for r in rank_abs].index(AWAY)+1} of {len(ROWS)}</div></div>
+      <div class="sub">{pctile(scores,them['s']):.0f}th percentile{f", {[r['kid'] for r in rank_abs].index(AWAY)+1} of {len(ROWS)}" if AWAY_IN_ZONE else ", outside the zone"}</div></div>
     <div class="tile"><div class="lab">Highest in zone</div>
       <div class="big">{m(max(scores))}</div>
       <div class="sub">K{max(ROWS,key=lambda r:r['s'])['kid']}</div></div>
@@ -446,9 +474,7 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
       <div class="delta{' met' if t[3]<=0 else ''}">{'on pace' if t[3]<=0 else f'+{t[3]*100:.0f}%'}</div></div>"""
       for t in targets)}
   </div>
-  <p class="note" style="margin-top:14px">The last row is on the list for completeness, not as a
-  goal. Only {sum(1 for v in per if v >= them_per)} of {len(per)} kingdoms in the zone are scoring
-  at {AWAY}'s rate per player.</p>
+  {PACE_NOTE}
 </section>
 
 <section>
@@ -461,8 +487,9 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
     <div class="tile"><div class="lab">A normal matchup</div><div class="big">{q(gaps,.5):.1f}x</div>
       <div class="sub">half the matchups in the zone are closer than this, half are wider</div></div>
     <div class="tile hi"><div class="lab">Ours</div>
-      <div class="big" style="color:var(--them)">{our_gap:.1f}x</div>
-      <div class="sub">{AWAY} is {our_gap:.1f} times ahead of us today, wider than
+      <div class="big" style="color:var(--{'us' if AHEAD else 'them'})">{our_gap:.1f}x</div>
+      <div class="sub">{f'we are {our_gap:.1f} times ahead of {AWAY} today' if AHEAD
+        else f'{AWAY} is {our_gap:.1f} times ahead of us today'}, a wider gap than
       {pctile(gaps,our_gap):.0f} out of every 100 matchups</div></div>
     <div class="tile"><div class="lab">A rough draw</div><div class="big">{q(gaps,.75):.1f}x</div>
       <div class="sub">only a quarter of matchups are wider than this</div></div>
@@ -495,8 +522,8 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
 </div>
 '''
 
-out = os.path.join(HERE, 'index.html')
+out = os.environ.get('OUT', os.path.join(HERE, 'index.html'))
 open(out, 'w').write(HTML)
 print('wrote', out, len(HTML), 'chars')
-print(f"826 {m(me['s'])} p{pctile(scores,me['s']):.0f} | per {k(me_per)} "
+print(f"{HOME} {m(me['s'])} p{pctile(scores,me['s']):.0f} | per {k(me_per)} "
       f"p{pctile(per,me_per):.0f} | gap {our_gap:.2f}x")
