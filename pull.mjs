@@ -14,7 +14,7 @@
  *   node pull.mjs            defaults to kingdom 826, zone 750-900
  *   HOME=826 LO=750 HI=900 node pull.mjs
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 const SCORES = 'https://kvk.kingshotsimulator.com';
 const MP = 'https://mightpulse.com';
@@ -33,6 +33,16 @@ const HEAD = {
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* The source being down is not a failure on our side, and there is nothing to
+   retry an hour later that this run can fix. Say so, tell the workflow to skip
+   the rest, and leave the last good page up rather than emailing about it. */
+function skip(why) {
+  console.log('SKIPPING: ' + why);
+  console.log('The published page is unchanged. Nothing to fix here, the next run will try again.');
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'skip=1\n');
+  process.exit(0);
+}
 
 /* 4xx means that kingdom has no record, so give up on it quietly. 5xx and
    network errors are the host struggling, so back off and try again. */
@@ -59,18 +69,21 @@ async function pool(items, fn) {
 
 const zone = Array.from({ length: HI - LO + 1 }, (_, i) => LO + i);
 
+/* One probe before the sweep. Without it, a host that is simply down costs
+   151 kingdoms times five retries times a backoff that reaches twelve seconds,
+   which is roughly ten minutes of runner time to learn one thing. */
 const scores = {};
-await pool(zone, async kid => {
-  const d = await getJson(`${SCORES}/api/kvk/scores/${kid}`);
+const probe = await getJson(`${SCORES}/api/kvk/scores/${HOME}`, 4);
+if (!probe) skip('the score host is not answering');
+if (!probe.days) skip(`kingdom ${HOME} has no score record right now`);
+scores[HOME] = probe;
+
+await pool(zone.filter(k => k !== HOME), async kid => {
+  const d = await getJson(`${SCORES}/api/kvk/scores/${kid}`, 3);
   if (d && d.days) scores[kid] = d;
 });
 const ids = Object.keys(scores).map(Number);
 console.log(`scores: ${ids.length} of ${zone.length} kingdoms have a KvK record`);
-
-if (!scores[HOME]) {
-  console.error(`kingdom ${HOME} has no scores, refusing to build a page without us on it`);
-  process.exit(1);
-}
 
 const cached = JSON.parse(readFileSync(new URL('./meta.json', import.meta.url), 'utf8'));
 const meta = {};
@@ -103,14 +116,37 @@ for (const kid of ids) {
 }
 rows.sort((a, b) => a.kid - b.kid);
 
-if (rows.length < 100) {
-  console.error(`only ${rows.length} kingdoms have a live score, refusing to publish a thin page`);
-  process.exit(1);
+/* The opponent is often outside the zone we compare against. It still has to
+   appear in the versus bar and be pinned on the charts, so fetch it separately
+   and hand it over as `extra`, which the builder keeps out of the distribution
+   and the leaderboards. Without this the build dies the day we draw someone
+   outside 750-900, which is most months. */
+const extra = [];
+const oppId = any.opponent;
+if (oppId && !scores[oppId]) {
+  const s = await getJson(`${SCORES}/api/kvk/scores/${oppId}`, 4);
+  const k = await getJson(`${MP}/api/kingdoms/${oppId}`, 3);
+  if (s && s.days) {
+    const days = s.days.map(x => [x.home_score, x.away_score]);
+    const tg = k ? Object.fromEntries((k.pyramid?.tg || []).map(t => [t.label, t.count])) : {};
+    extra.push({ kid: oppId, opp: s.opponent, s: days[day - 1][0], o: days[day - 1][1],
+                 a7: k ? k.active_7d : 0, tg8: tg.TG8 || 0,
+                 players: k ? k.player_count : 0, age: k ? Math.round(k.age_days || 0) : 0,
+                 days });
+    console.log(`opponent ${oppId} sits outside the zone, carried separately`
+                + (k ? '' : ' (no active player count available)'));
+  } else {
+    console.log(`opponent ${oppId} sits outside the zone and has no record we can read`);
+  }
 }
+
+// early in a new day, or between prep weeks, too few kingdoms have reported for
+// a percentile to mean anything
+if (rows.length < 100) skip(`only ${rows.length} kingdoms have a live score so far`);
 
 writeFileSync(new URL('./data.json', import.meta.url), JSON.stringify({
   season: any.season, day, home: HOME, away: any.opponent,
-  updated: any.updated_at, zone: [LO, HI], rows,
+  updated: any.updated_at, zone: [LO, HI], rows, extra,
 }));
 
 // keep the snapshot warm for the next run that gets turned away
