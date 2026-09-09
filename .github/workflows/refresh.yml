@@ -22,6 +22,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # when the source is down there is nothing to publish, so the rest of the
+    # run stands down quietly and the last good page stays up
+    outputs:
+      skip: ${{ steps.pull.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +38,7 @@ jobs:
           python-version: '3.12'
 
       - name: Pull the latest scores
+        id: pull
         env:
           HOME_KID: '826'
           LO: '750'
@@ -41,9 +46,11 @@ jobs:
         run: node pull.mjs
 
       - name: Build the page
+        if: steps.pull.outputs.skip != '1'
         run: python3 build.py
 
       - name: Keep the active player snapshot current
+        if: steps.pull.outputs.skip != '1'
         run: |
           if ! git diff --quiet -- meta.json; then
             git config user.name  'github-actions[bot]'
@@ -54,17 +61,20 @@ jobs:
           fi
 
       - name: Collect the site
+        if: steps.pull.outputs.skip != '1'
         run: |
           mkdir -p _site
           cp index.html _site/index.html
           if [ -d snapshots ]; then cp -r snapshots _site/snapshots; fi
 
       - uses: actions/upload-pages-artifact@v3
+        if: steps.pull.outputs.skip != '1'
         with:
           path: _site
 
   deploy:
     needs: build
+    if: needs.build.outputs.skip != '1'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
