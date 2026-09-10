@@ -196,6 +196,8 @@ for i in range(5):
 built = (D.get('updated') or '')[:16].replace('T', ' ') + ' UTC' if D.get('updated') \
     else datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
 
+SOURCE = D.get('source', 'mightpulse.com')
+
 RULE = f'<img class="rule" src="{A["divider"]}" alt="">'
 CORNERS = ''.join(f'<img class="cnr c{i}" src="{A["corner"]}" alt="">' for i in range(4))
 
@@ -396,7 +398,7 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
   A score on its own tells you nothing, so this page puts kingdom {HOME}'s score next to
   the {len(ROWS)-1} other kingdoms around us and shows whether it is a good day or a quiet one.
   {'It refreshes every day.' if LIVE else 'This is a snapshot of day ' + ROMAN[DAY-1] + ', taken after it closed.'}</p>
-  <p class="stamp">Day {ROMAN[DAY-1]} of V &middot; {'scores as at' if LIVE else 'final scores, captured'} {built} &middot; source kvk.kingshotsimulator.com</p>
+  <p class="stamp">Day {ROMAN[DAY-1]} of V &middot; {'scores as at' if LIVE else 'final scores, captured'} {built} &middot; source {SOURCE}</p>
 
   <div class="versus">
     {CORNERS}
@@ -516,8 +518,7 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
     </div>
   </div>
   <p class="src">Kingdoms {LO} to {HI}, {len(ROWS)} with published scores. Day scores from
-  kvk.kingshotsimulator.com, active player counts from mightpulse.com, both pulled {built}.
-  Rebuilt daily.</p>
+  {SOURCE}, active player counts from mightpulse.com, both pulled {built}. Rebuilt hourly.</p>
 </footer>
 </div>
 '''

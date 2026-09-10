@@ -16,8 +16,14 @@
  */
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
-const SCORES = 'https://kvk.kingshotsimulator.com';
 const MP = 'https://mightpulse.com';
+/* Scores used to come only from kvk.kingshotsimulator.com. Mightpulse now
+   proxies the same payload at the same path, so try it first: it is the host
+   we already depend on for active player counts, and it stayed up through the
+   September outage that took the other one off the air for over a day. The
+   original stays as a fallback in case the proxy is ever dropped. */
+const SCORE_HOSTS = [MP, 'https://kvk.kingshotsimulator.com'];
+let SCORES = SCORE_HOSTS[0];
 const HOME = Number(process.env.HOME_KID || 826);
 const LO = Number(process.env.LO || 750);
 const HI = Number(process.env.HI || 900);
@@ -73,8 +79,14 @@ const zone = Array.from({ length: HI - LO + 1 }, (_, i) => LO + i);
    151 kingdoms times five retries times a backoff that reaches twelve seconds,
    which is roughly ten minutes of runner time to learn one thing. */
 const scores = {};
-const probe = await getJson(`${SCORES}/api/kvk/scores/${HOME}`, 4);
-if (!probe) skip('the score host is not answering');
+let probe = null;
+for (const host of SCORE_HOSTS) {
+  probe = await getJson(`${host}/api/kvk/scores/${HOME}`, 3);
+  if (probe) { SCORES = host; break; }
+  console.log(`${host} is not answering, trying the next source`);
+}
+if (!probe) skip('no score source is answering');
+console.log(`scores from ${SCORES}`);
 if (!probe.days) skip(`kingdom ${HOME} has no score record right now`);
 scores[HOME] = probe;
 
@@ -146,7 +158,8 @@ if (rows.length < 100) skip(`only ${rows.length} kingdoms have a live score so f
 
 writeFileSync(new URL('./data.json', import.meta.url), JSON.stringify({
   season: any.season, day, home: HOME, away: any.opponent,
-  updated: any.updated_at, zone: [LO, HI], rows, extra,
+  updated: any.updated_at, source: SCORES.replace(/^https:\/\//, ''),
+  zone: [LO, HI], rows, extra,
 }));
 
 // keep the snapshot warm for the next run that gets turned away
