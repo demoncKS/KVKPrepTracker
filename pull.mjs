@@ -50,19 +50,32 @@ function skip(why) {
   process.exit(0);
 }
 
-/* 4xx means that kingdom has no record, so give up on it quietly. 5xx and
-   network errors are the host struggling, so back off and try again. */
+/* 4xx means that kingdom has no record, so give up on it quietly, except 429
+   which is the host asking us to slow down. 5xx and network errors are the host
+   struggling, so back off and try again.
+
+   Every failure records WHY in LAST_ERR. Without it a refusal, a rate limit and
+   a timeout all look identical from the log, which cost us a day of guessing. */
+let LAST_ERR = '';
+const ATTEMPT_MS = 12000;
+
 async function getJson(url, tries = 5) {
   let wait = 1200;
+  let why = 'no attempt made';
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await fetch(url, { headers: HEAD });
+      const r = await fetch(url, { headers: HEAD, signal: AbortSignal.timeout(ATTEMPT_MS) });
       if (r.ok) return await r.json();
-      if (r.status >= 400 && r.status < 500) return null;
-    } catch { /* network, retry */ }
+      why = 'HTTP ' + r.status;
+      if (r.status >= 400 && r.status < 500 && r.status !== 429) { LAST_ERR = why; return null; }
+    } catch (e) {
+      why = e.name === 'TimeoutError' ? `no reply within ${ATTEMPT_MS / 1000}s`
+          : `${e.name}: ${(e.cause && e.cause.code) || e.message}`;
+    }
     await sleep(wait + Math.random() * 800);
     wait = Math.min(wait * 1.8, 12000);
   }
+  LAST_ERR = why;
   return null;
 }
 
@@ -83,9 +96,9 @@ let probe = null;
 for (const host of SCORE_HOSTS) {
   probe = await getJson(`${host}/api/kvk/scores/${HOME}`, 3);
   if (probe) { SCORES = host; break; }
-  console.log(`${host} is not answering, trying the next source`);
+  console.log(`${host} refused us: ${LAST_ERR}`);
 }
-if (!probe) skip('no score source is answering');
+if (!probe) skip(`no score source is answering (last: ${LAST_ERR})`);
 console.log(`scores from ${SCORES}`);
 if (!probe.days) skip(`kingdom ${HOME} has no score record right now`);
 scores[HOME] = probe;
