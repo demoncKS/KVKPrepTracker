@@ -41,8 +41,8 @@ jobs:
         id: pull
         env:
           HOME_KID: '826'
-          LO: '750'
-          HI: '900'
+          LO: '588'
+          HI: '1086'
         run: node pull.mjs
 
       - name: Build the page
