@@ -1,33 +1,34 @@
 /* Pull one hour's worth of prep week data and write data.json.
  *
- * Two sources, two hosts:
- *   kvk.kingshotsimulator.com/api/kvk/scores/{kid}   the daily KvK scores
- *   mightpulse.com/api/kingdoms/{kid}                active players and troop grades
+ * Two bulk endpoints, two requests, whatever the size of the zone:
+ *   /api/kvk/scores    every KvK pair in the game, with the per-day scores
+ *   /api/kingdoms      every kingdom, with active players, roster size and age
  *
- * Neither sends CORS headers, so this cannot run in a browser on another
- * origin. It has to run server side, which is what the workflow does.
+ * The old version fetched one kingdom at a time, which was about 300 requests
+ * an hour for a 151 kingdom zone and would have been a thousand for a 499
+ * kingdom one. These two calls replace all of it, so widening the zone now
+ * costs nothing. Neither host sends CORS headers, so this still has to run
+ * server side, which is what the workflow does.
  *
- * Active player counts barely move week to week, so if mightpulse refuses the
- * runner we fall back to the committed meta.json rather than dropping the
+ * Active player counts barely move week to week, so if the kingdom feed refuses
+ * the runner we fall back to the committed meta.json rather than dropping the
  * per-active-player view. Scores have no fallback: no scores, no build.
  *
- *   node pull.mjs            defaults to kingdom 826, zone 750-900
- *   HOME=826 LO=750 HI=900 node pull.mjs
+ *   node pull.mjs            defaults to kingdom 826, zone 588-1086
+ *   HOME_KID=826 LO=588 HI=1086 node pull.mjs
  */
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 
 const MP = 'https://mightpulse.com';
 /* Scores used to come only from kvk.kingshotsimulator.com. Mightpulse now
-   proxies the same payload at the same path, so try it first: it is the host
-   we already depend on for active player counts, and it stayed up through the
-   September outage that took the other one off the air for over a day. The
-   original stays as a fallback in case the proxy is ever dropped. */
+   proxies the same payload, so try it first: it is the host we already depend
+   on for the kingdom feed, and it stayed up through the September outage that
+   took the other one off the air for over a day. */
 const SCORE_HOSTS = [MP, 'https://kvk.kingshotsimulator.com'];
 let SCORES = SCORE_HOSTS[0];
 const HOME = Number(process.env.HOME_KID || 826);
-const LO = Number(process.env.LO || 750);
-const HI = Number(process.env.HI || 900);
-const CONC = 6;
+const LO = Number(process.env.LO || 588);
+const HI = Number(process.env.HI || 1086);
 
 // a plain script fetch gets turned away by some front ends, so look ordinary
 const HEAD = {
@@ -38,148 +39,133 @@ const HEAD = {
   referer: MP + '/',
 };
 
+let LAST_ERR = '';
+const ATTEMPT_MS = 25000;        // the bulk payloads are megabytes, give them room
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/* The source being down is not a failure on our side, and there is nothing to
-   retry an hour later that this run can fix. Say so, tell the workflow to skip
-   the rest, and leave the last good page up rather than emailing about it. */
 function skip(why) {
   console.log('SKIPPING: ' + why);
-  console.log('The published page is unchanged. Nothing to fix here, the next run will try again.');
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, 'skip=1\n');
   process.exit(0);
 }
 
-/* 4xx means that kingdom has no record, so give up on it quietly, except 429
-   which is the host asking us to slow down. 5xx and network errors are the host
-   struggling, so back off and try again.
-
-   Every failure records WHY in LAST_ERR. Without it a refusal, a rate limit and
-   a timeout all look identical from the log, which cost us a day of guessing. */
-let LAST_ERR = '';
-const ATTEMPT_MS = 12000;
-
-async function getJson(url, tries = 5) {
-  let wait = 1200;
-  let why = 'no attempt made';
+/* Retries are for a host warming up or buckling, not for a 404. A refusal, a
+   rate limit and a timeout all look identical in the log otherwise, which cost
+   us a day of guessing once, so each one is recorded. */
+async function getJson(url, tries = 4) {
+  let wait = 2000;
   for (let i = 0; i < tries; i++) {
     try {
       const r = await fetch(url, { headers: HEAD, signal: AbortSignal.timeout(ATTEMPT_MS) });
       if (r.ok) return await r.json();
-      why = 'HTTP ' + r.status;
-      if (r.status >= 400 && r.status < 500 && r.status !== 429) { LAST_ERR = why; return null; }
+      LAST_ERR = `HTTP ${r.status}`;
+      if (r.status >= 400 && r.status < 500 && r.status !== 429) return null;
     } catch (e) {
-      why = e.name === 'TimeoutError' ? `no reply within ${ATTEMPT_MS / 1000}s`
-          : `${e.name}: ${(e.cause && e.cause.code) || e.message}`;
+      LAST_ERR = e.name === 'TimeoutError' ? `no answer in ${ATTEMPT_MS / 1000}s` : String(e.message || e);
     }
-    await sleep(wait + Math.random() * 800);
-    wait = Math.min(wait * 1.8, 12000);
+    if (i < tries - 1) { await sleep(wait + Math.random() * 1000); wait = Math.min(wait * 1.8, 20000); }
   }
-  LAST_ERR = why;
   return null;
 }
 
-async function pool(items, fn) {
-  let i = 0;
-  await Promise.all(Array.from({ length: CONC }, async () => {
-    while (i < items.length) await fn(items[i++]);
-  }));
-}
-
-const zone = Array.from({ length: HI - LO + 1 }, (_, i) => LO + i);
-
-/* One probe before the sweep. Without it, a host that is simply down costs
-   151 kingdoms times five retries times a backoff that reaches twelve seconds,
-   which is roughly ten minutes of runner time to learn one thing. */
-const scores = {};
-let probe = null;
+/* ---------------------------------------------------------------- scores */
+let bulk = null;
 for (const host of SCORE_HOSTS) {
-  probe = await getJson(`${host}/api/kvk/scores/${HOME}`, 3);
-  if (probe) { SCORES = host; break; }
-  console.log(`${host} refused us: ${LAST_ERR}`);
+  bulk = await getJson(`${host}/api/kvk/scores`);
+  if (bulk && Array.isArray(bulk.pairs) && bulk.pairs.length) { SCORES = host; break; }
+  console.log(`${host} gave us nothing usable: ${LAST_ERR}`);
+  bulk = null;
 }
-if (!probe) skip(`no score source is answering (last: ${LAST_ERR})`);
-console.log(`scores from ${SCORES}`);
-if (!probe.days) skip(`kingdom ${HOME} has no score record right now`);
-scores[HOME] = probe;
+if (!bulk) skip(`no score source is answering (last: ${LAST_ERR})`);
 
-await pool(zone.filter(k => k !== HOME), async kid => {
-  const d = await getJson(`${SCORES}/api/kvk/scores/${kid}`, 3);
-  if (d && d.days) scores[kid] = d;
-});
-const ids = Object.keys(scores).map(Number);
-console.log(`scores: ${ids.length} of ${zone.length} kingdoms have a KvK record`);
+/* Flatten the pair list into one record per kingdom. Each pair carries both
+   sides, so which column is "us" depends on which half of kids we are. */
+const rec = {};
+for (const p of bulk.pairs) {
+  const ds = p.days || [];
+  const [a, b] = p.kids;
+  rec[a] = { opp: b, days: ds.map(d => [d.home_score || 0, d.away_score || 0]) };
+  rec[b] = { opp: a, days: ds.map(d => [d.away_score || 0, d.home_score || 0]) };
+}
+const mine = rec[HOME];
+if (!mine) skip(`kingdom ${HOME} has no score record in this season yet`);
 
+const day = bulk.current_day;
+if (!day || !mine.days[day - 1]) skip(`no day ${day} scores published yet`);
+
+/* ---------------------------------------------------------------- kingdoms */
 const cached = JSON.parse(readFileSync(new URL('./meta.json', import.meta.url), 'utf8'));
 const meta = {};
-let fresh = 0;
-await pool(ids, async kid => {
-  const k = await getJson(`${MP}/api/kingdoms/${kid}`, 3);
-  if (!k) return;
-  const tg = Object.fromEntries((k.pyramid?.tg || []).map(t => [t.label, t.count]));
-  meta[kid] = { a7: k.active_7d, players: k.player_count,
-                age: Math.round(k.age_days || 0), tg8: tg.TG8 || 0 };
-  fresh++;
-});
-const stale = ids.filter(k => !meta[k] && cached[k]).length;
-for (const kid of ids) if (!meta[kid] && cached[kid]) meta[kid] = cached[kid];
-console.log(`meta: ${fresh} fresh, ${stale} from the cached snapshot`);
+const feed = await getJson(`${MP}/api/kingdoms`, 3);
+const list = feed ? (feed.kingdoms || feed.results || (Array.isArray(feed) ? feed : [])) : [];
+for (const k of list) {
+  const kid = k.kid ?? k.id;
+  if (!kid) continue;
+  meta[kid] = { a7: k.active_7d || 0, players: k.player_count || 0,
+                age: Math.round(k.age_days || 0), tg8: 0 };
+}
+const fresh = Object.keys(meta).length;
+if (!fresh) console.log(`kingdom feed refused us (${LAST_ERR}), falling back to the snapshot`);
 
-const any = scores[HOME];
-const day = any.current_day;
+/* ---------------------------------------------------------------- rows */
 const rows = [];
-for (const kid of ids) {
-  const s = scores[kid], mt = meta[kid];
+for (let kid = LO; kid <= HI; kid++) {
+  const s = rec[kid];
+  if (!s) continue;
+  const mt = meta[kid] || cached[kid];
   if (!mt) continue;                       // no active count, cannot place it fairly
-  const days = s.days.map(x => [x.home_score, x.away_score]);
-  const [home, away] = days[day - 1];
+  const [home, away] = s.days[day - 1] || [0, 0];
   // a zero on the live day means that kingdom has not reported yet, and
   // counting it as a real zero drags the median down
   if (!home) continue;
-  rows.push({ kid, opp: s.opponent, s: home, o: away,
-              a7: mt.a7, tg8: mt.tg8, players: mt.players, age: mt.age, days });
+  rows.push({ kid, opp: s.opp, s: home, o: away,
+              a7: mt.a7, tg8: mt.tg8 || 0, players: mt.players, age: mt.age, days: s.days });
 }
 rows.sort((a, b) => a.kid - b.kid);
 
-/* The opponent is often outside the zone we compare against. It still has to
-   appear in the versus bar and be pinned on the charts, so fetch it separately
-   and hand it over as `extra`, which the builder keeps out of the distribution
-   and the leaderboards. Without this the build dies the day we draw someone
-   outside 750-900, which is most months. */
+/* The opponent can sit outside the zone we compare against. It still has to
+   appear in the versus bar and be pinned on the charts, so it is handed over
+   as `extra`, which the builder keeps out of the distribution and the boards. */
 const extra = [];
-const oppId = any.opponent;
-if (oppId && !scores[oppId]) {
-  const s = await getJson(`${SCORES}/api/kvk/scores/${oppId}`, 4);
-  const k = await getJson(`${MP}/api/kingdoms/${oppId}`, 3);
-  if (s && s.days) {
-    const days = s.days.map(x => [x.home_score, x.away_score]);
-    const tg = k ? Object.fromEntries((k.pyramid?.tg || []).map(t => [t.label, t.count])) : {};
-    extra.push({ kid: oppId, opp: s.opponent, s: days[day - 1][0], o: days[day - 1][1],
-                 a7: k ? k.active_7d : 0, tg8: tg.TG8 || 0,
-                 players: k ? k.player_count : 0, age: k ? Math.round(k.age_days || 0) : 0,
-                 days });
+const oppId = mine.opp;
+if (oppId && !rows.some(r => r.kid === oppId)) {
+  const s = rec[oppId];
+  const mt = meta[oppId] || cached[oppId];
+  if (s) {
+    const [home, away] = s.days[day - 1] || [0, 0];
+    extra.push({ kid: oppId, opp: s.opp, s: home, o: away,
+                 a7: mt ? mt.a7 : 0, tg8: 0, players: mt ? mt.players : 0,
+                 age: mt ? mt.age : 0, days: s.days });
     console.log(`opponent ${oppId} sits outside the zone, carried separately`
-                + (k ? '' : ' (no active player count available)'));
+                + (mt ? '' : ' (no active player count available)'));
   } else {
     console.log(`opponent ${oppId} sits outside the zone and has no record we can read`);
   }
 }
 
 // early in a new day, or between prep weeks, too few kingdoms have reported for
-// a percentile to mean anything
-if (rows.length < 100) skip(`only ${rows.length} kingdoms have a live score so far`);
+// a percentile to mean anything. Scaled to the zone so widening it is safe.
+const zoneSize = HI - LO + 1;
+const floor = Math.max(80, Math.round(zoneSize * 0.4));
+if (rows.length < floor) {
+  skip(`only ${rows.length} of ${zoneSize} kingdoms have a live score so far, need ${floor}`);
+}
+if (!rows.some(r => r.kid === HOME)) skip(`kingdom ${HOME} has not reported a day ${day} score yet`);
 
 writeFileSync(new URL('./data.json', import.meta.url), JSON.stringify({
-  season: any.season, day, home: HOME, away: any.opponent,
-  updated: any.updated_at, source: SCORES.replace(/^https:\/\//, ''),
+  season: bulk.season, day, home: HOME, away: oppId,
+  updated: bulk.updated_at, source: SCORES.replace(/^https:\/\//, ''),
   zone: [LO, HI], rows, extra,
 }));
 
 // keep the snapshot warm for the next run that gets turned away
-if (fresh > ids.length * 0.9) {
-  writeFileSync(new URL('./meta.json', import.meta.url), JSON.stringify(meta, null, 0));
+if (fresh > 1000) {
+  const keep = {};
+  for (let kid = LO; kid <= HI; kid++) if (meta[kid]) keep[kid] = meta[kid];
+  if (oppId && meta[oppId]) keep[oppId] = meta[oppId];
+  writeFileSync(new URL('./meta.json', import.meta.url), JSON.stringify(keep, null, 0));
 }
 
 const me = rows.find(r => r.kid === HOME);
-console.log(`season ${any.season} day ${day}: ${rows.length} kingdoms with a live score`);
+console.log(`season ${bulk.season} day ${day}: ${rows.length} of ${zoneSize} kingdoms scoring`);
 console.log(`${HOME} ${me.s.toLocaleString()} vs ${me.opp} ${me.o.toLocaleString()}`);

@@ -90,13 +90,24 @@ def dist_svg(vals, width, mark_us, mark_them, fmt, unit, cid):
             f'<rect x="{bx:.1f}" y="{byy:.1f}" width="{max(1,bw-2):.1f}" height="{bh:.1f}" '
             f'rx="3" class="bar"><title>{c} kingdom{"s" if c!=1 else ""} between '
             f'{fmt(lo_)} and {fmt(hi_)}</title></rect>')
-    # pins
-    for val, cls, label in ((mark_them, 'them', f'K{AWAY}'), (mark_us, 'us', f'K{HOME}')):
+    # pins. A wider zone pushes the scale out and brings the two markers close
+    # together, so when they are within a label's width of each other the left
+    # one is lifted and turned to read leftward, away from its neighbour.
+    pins = [(mark_them, 'them', f'K{AWAY}'), (mark_us, 'us', f'K{HOME}')]
+    close = abs(x(mark_them) - x(mark_us)) < 200
+    left_val = min(mark_them, mark_us)
+    for val, cls, label in pins:
         px = x(val)
-        out.append(f'<line x1="{px:.1f}" y1="{padT-14}" x2="{px:.1f}" y2="{padT+ph}" class="pin {cls}"/>')
-        anchor = 'end' if px > W - 150 else 'start'
-        dx = -7 if anchor == 'end' else 7
-        out.append(f'<text x="{px+dx:.1f}" y="{padT-20}" class="pinlab {cls}" '
+        is_left = close and val == left_val
+        lift = 20 if is_left else 0
+        out.append(f'<line x1="{px:.1f}" y1="{padT-14-lift}" x2="{px:.1f}" y2="{padT+ph}" '
+                   f'class="pin {cls}"/>')
+        if is_left and px > 150:
+            anchor, dx = 'end', -7
+        else:
+            anchor = 'end' if px > W - 150 else 'start'
+            dx = -7 if anchor == 'end' else 7
+        out.append(f'<text x="{px+dx:.1f}" y="{padT-20-lift}" class="pinlab {cls}" '
                    f'text-anchor="{anchor}">{label}  {fmt(val)}</text>')
     # value axis
     for i in range(6):
