@@ -2,10 +2,25 @@ name: Refresh prep week tracker
 
 on:
   schedule:
-    # every hour on the hour, UTC. GitHub runs scheduled jobs on a best effort
-    # basis and can be ten to forty minutes late when the queue is busy, so the
-    # page stamps the source's own snapshot time rather than the build time.
-    - cron: '0 * * * *'
+    # Six firings an hour, not one.
+    #
+    # GitHub runs scheduled workflows on a best effort basis and quietly drops
+    # most of them on a free public repo. Measured here over 31 Oct to 2 Nov
+    # 2026, a single '0 * * * *' entry delivered about one run every five and a
+    # half hours, not twenty four a day. Gaps of four, six and eight hours were
+    # normal. During a five day prep week that means the page can be most of a
+    # day stale while someone is trying to read the live standings off it.
+    #
+    # There is no way to make GitHub honour a schedule, so the fix is to ask
+    # more often. Six chances an hour instead of one. The gate job below is what
+    # stops that being wasteful: outside prep week it costs ten seconds and
+    # nothing else, because it refuses to rebuild a page whose data has not
+    # moved.
+    #
+    # The minutes are deliberately not :00, which is the most congested slot on
+    # GitHub. The firings that did get through on this repo landed around :11 to
+    # :18 and :43 to :51, so these sit just ahead of those windows.
+    - cron: '2,12,22,32,42,52 * * * *'
   workflow_dispatch:        # the Run workflow button, for a refresh on demand
   push:
     branches: [main]
@@ -20,7 +35,80 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------- gate
+  # Is there anything new to publish at all?
+  #
+  # Between seasons mightpulse keeps serving the last finished day forever, so
+  # the old workflow happily re-pulled, rebuilt and redeployed an identical page
+  # around the clock for three weeks out of every four. That is the waste worth
+  # removing, not the firing itself.
+  #
+  # The published page already prints the source's own snapshot time, and
+  # build.py takes it straight from the feed's updated_at. So the two are
+  # directly comparable: if the feed's stamp matches the one already on the
+  # live page, nothing has changed since the last build and there is nothing
+  # to do. No state file, nothing to keep in sync, and it re-arms by itself the
+  # moment a new season starts moving.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        shell: bash
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_OUTPUT"
+          import json, os, re, sys, urllib.request
+
+          def get(url, timeout=25):
+              req = urllib.request.Request(url, headers={
+                  'user-agent': 'Mozilla/5.0', 'accept': '*/*'})
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return r.read().decode('utf-8', 'replace')
+
+          def say(build, why):
+              print('build=%d' % build)                       # -> GITHUB_OUTPUT
+              print('::notice::%s' % why, file=sys.stderr)    # -> the run log only
+              raise SystemExit
+
+          # a manual dispatch or a code push is always meant to rebuild
+          if os.environ.get('GITHUB_EVENT_NAME') != 'schedule':
+              say(1, 'not a scheduled run, building')
+
+          try:
+              feed = json.loads(get('https://mightpulse.com/api/kvk/scores'))
+              src = (feed.get('updated_at') or '')[:16]      # YYYY-MM-DDTHH:MM
+          except Exception as e:
+              # nothing to publish if the source is down, and the pull would
+              # skip anyway, so do not spend a runner finding that out slowly
+              say(0, 'source unreachable (%s), standing down' % type(e).__name__)
+
+          if not src:
+              say(1, 'source gave no timestamp, building to be safe')
+
+          owner = os.environ.get('GITHUB_REPOSITORY_OWNER', '').lower()
+          repo = os.environ.get('GITHUB_REPOSITORY', '/').split('/')[-1]
+          page = 'https://%s.github.io/%s/index.html?gate=%s' % (owner, repo, src[-5:])
+
+          try:
+              html = get(page, timeout=20)
+          except Exception as e:
+              say(1, 'live page unreadable (%s), building' % type(e).__name__)
+
+          m = re.search(r'pulled\s+(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})\s+UTC', html)
+          if not m:
+              say(1, 'no timestamp found on the live page, building')
+
+          live = '%sT%s' % (m.group(1), m.group(2))
+          if live == src:
+              say(0, 'nothing new, live page already shows %s' % live)
+          say(1, 'source moved to %s, live page has %s, building' % (src, live))
+          PY
+
+  # ---------------------------------------------------------------- build
   build:
+    needs: gate
+    if: needs.gate.outputs.build == '1'
     runs-on: ubuntu-latest
     # when the source is down there is nothing to publish, so the rest of the
     # run stands down quietly and the last good page stays up
