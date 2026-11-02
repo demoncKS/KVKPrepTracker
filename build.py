@@ -529,7 +529,7 @@ footer{{padding-top:26px;color:var(--dim);font-size:.8rem}}
     </div>
   </div>
   <p class="src">Kingdoms {LO} to {HI}, {len(ROWS)} with published scores. Day scores from
-  {SOURCE}, active player counts from mightpulse.com, both pulled {built}. Rebuilt hourly.</p>
+  {SOURCE}, active player counts from mightpulse.com, both pulled {built}. Checked for new scores several times an hour.</p>
 </footer>
 </div>
 '''
