@@ -98,10 +98,20 @@ const cached = JSON.parse(readFileSync(new URL('./meta.json', import.meta.url), 
 const meta = {};
 const feed = await getJson(`${MP}/api/kingdoms`, 3);
 const list = feed ? (feed.kingdoms || feed.results || (Array.isArray(feed) ? feed : [])) : [];
+/* `act` is the denominator for the points-per-player view and it is deliberately
+   active_players, not active_7d.
+   Measured across the 498 kingdoms in the zone on 2 Nov 2026, active_7d has a
+   correlation with day score of -0.002. That is not a weak signal, it is none,
+   so dividing by it manufactured differences that were not there: kingdom 919
+   came out as the third hardest working kingdom in the zone purely because
+   mightpulse credited them 141 active players. active_players correlates at
+   0.65 and has the tightest spread of every candidate, so it is the honest one.
+   active_7d is still carried for reference, it is just not divided by. */
 for (const k of list) {
   const kid = k.kid ?? k.id;
   if (!kid) continue;
-  meta[kid] = { a7: k.active_7d || 0, players: k.player_count || 0,
+  meta[kid] = { act: k.active_players || 0, a7: k.active_7d || 0,
+                players: k.player_count || 0,
                 age: Math.round(k.age_days || 0), tg8: 0 };
 }
 const fresh = Object.keys(meta).length;
@@ -119,29 +129,35 @@ for (let kid = LO; kid <= HI; kid++) {
   // counting it as a real zero drags the median down
   if (!home) continue;
   rows.push({ kid, opp: s.opp, s: home, o: away,
-              a7: mt.a7, tg8: mt.tg8 || 0, players: mt.players, age: mt.age, days: s.days });
+              act: mt.act || 0, a7: mt.a7 || 0, tg8: mt.tg8 || 0,
+              players: mt.players, age: mt.age, days: s.days });
 }
 rows.sort((a, b) => a.kid - b.kid);
 
-/* The opponent can sit outside the zone we compare against. It still has to
-   appear in the versus bar and be pinned on the charts, so it is handed over
-   as `extra`, which the builder keeps out of the distribution and the boards. */
+/* Opponents can sit outside the zone we compare against. They still have to
+   appear in the versus bar and be pinned on the charts, so they are handed over
+   as `extra`, which the builder keeps out of the distribution and the boards.
+   This used to carry only the home kingdom's opponent. Now that any kingdom in
+   the zone can be selected on the page, every one of them needs its own
+   opponent available: 94 of the 499 are drawn against someone outside. */
+const inZone = new Set(rows.map(r => r.kid));
 const extra = [];
-const oppId = mine.opp;
-if (oppId && !rows.some(r => r.kid === oppId)) {
+const seen = new Set();
+let missing = 0;
+for (const r of rows) {
+  const oppId = r.opp;
+  if (!oppId || inZone.has(oppId) || seen.has(oppId)) continue;
+  seen.add(oppId);
   const s = rec[oppId];
+  if (!s) { missing++; continue; }
   const mt = meta[oppId] || cached[oppId];
-  if (s) {
-    const [home, away] = s.days[day - 1] || [0, 0];
-    extra.push({ kid: oppId, opp: s.opp, s: home, o: away,
-                 a7: mt ? mt.a7 : 0, tg8: 0, players: mt ? mt.players : 0,
-                 age: mt ? mt.age : 0, days: s.days });
-    console.log(`opponent ${oppId} sits outside the zone, carried separately`
-                + (mt ? '' : ' (no active player count available)'));
-  } else {
-    console.log(`opponent ${oppId} sits outside the zone and has no record we can read`);
-  }
+  const [home, away] = s.days[day - 1] || [0, 0];
+  extra.push({ kid: oppId, opp: s.opp, s: home, o: away,
+               act: mt ? (mt.act || 0) : 0, a7: mt ? (mt.a7 || 0) : 0, tg8: 0,
+               players: mt ? mt.players : 0, age: mt ? mt.age : 0, days: s.days });
 }
+console.log(`${extra.length} opponents sit outside the zone and are carried separately`
+            + (missing ? `, ${missing} had no readable record` : ''));
 
 // early in a new day, or between prep weeks, too few kingdoms have reported for
 // a percentile to mean anything. Scaled to the zone so widening it is safe.
@@ -167,5 +183,6 @@ if (fresh > 1000) {
 }
 
 const me = rows.find(r => r.kid === HOME);
+console.log(`${rows.filter(r => !r.act).length} of ${rows.length} have no active player count`);
 console.log(`season ${bulk.season} day ${day}: ${rows.length} of ${zoneSize} kingdoms scoring`);
 console.log(`${HOME} ${me.s.toLocaleString()} vs ${me.opp} ${me.o.toLocaleString()}`);
