@@ -137,16 +137,34 @@ jobs:
         if: steps.pull.outputs.skip != '1'
         run: python3 build.py
 
+      # meta.json is a convenience cache of active player counts, used only as a
+      # fallback when the kingdom feed refuses us. Failing to save it is a minor
+      # inconvenience. Failing to publish the page is not, and until now a
+      # rejected push took the deploy down with it: run #835 on 2 Nov 2026 died
+      # here because a second commit landed on main while it was building, so
+      # its push was no longer a fast forward. Rebase onto whatever is there
+      # now, retry a couple of times, and never fail the run over it.
       - name: Keep the active player snapshot current
         if: steps.pull.outputs.skip != '1'
+        continue-on-error: true
         run: |
-          if ! git diff --quiet -- meta.json; then
-            git config user.name  'github-actions[bot]'
-            git config user.email 'github-actions[bot]@users.noreply.github.com'
-            git add meta.json
-            git commit -m 'refresh active player snapshot'
-            git push
+          if git diff --quiet -- meta.json; then
+            echo 'meta.json unchanged, nothing to save'
+            exit 0
           fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add meta.json
+          git commit -m 'refresh active player snapshot'
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash origin "$GITHUB_REF_NAME" \
+               && git push origin "HEAD:$GITHUB_REF_NAME"; then
+              echo "snapshot saved on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo '::warning::could not save meta.json, the page is published anyway'
 
       - name: Collect the site
         if: steps.pull.outputs.skip != '1'
