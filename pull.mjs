@@ -140,19 +140,20 @@ rows.sort((a, b) => a.kid - b.kid);
    This used to carry only the home kingdom's opponent. Now that any kingdom in
    the zone can be selected on the page, every one of them needs its own
    opponent available: 94 of the 499 are drawn against someone outside. */
+const oppId = mine.opp;          // the home kingdom's opponent, named on the payload
 const inZone = new Set(rows.map(r => r.kid));
 const extra = [];
 const seen = new Set();
 let missing = 0;
 for (const r of rows) {
-  const oppId = r.opp;
-  if (!oppId || inZone.has(oppId) || seen.has(oppId)) continue;
-  seen.add(oppId);
-  const s = rec[oppId];
+  const other = r.opp;
+  if (!other || inZone.has(other) || seen.has(other)) continue;
+  seen.add(other);
+  const s = rec[other];
   if (!s) { missing++; continue; }
-  const mt = meta[oppId] || cached[oppId];
+  const mt = meta[other] || cached[other];
   const [home, away] = s.days[day - 1] || [0, 0];
-  extra.push({ kid: oppId, opp: s.opp, s: home, o: away,
+  extra.push({ kid: other, opp: s.opp, s: home, o: away,
                act: mt ? (mt.act || 0) : 0, a7: mt ? (mt.a7 || 0) : 0, tg8: 0,
                players: mt ? mt.players : 0, age: mt ? mt.age : 0, days: s.days });
 }
